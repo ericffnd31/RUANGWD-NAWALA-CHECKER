@@ -40,7 +40,6 @@ def status_label(blocked) -> str:
     return "BLOCK" if blocked else "AMAN"
 
 def esc(text: str) -> str:
-    """Escape MarkdownV2 special chars."""
     for ch in r"_*[]()~`>#+-=|{}.!":
         text = text.replace(ch, f"\\{ch}")
     return text
@@ -51,14 +50,11 @@ def get_site_name() -> str:
 def page_keyboard(page: int, total: int, cmd: str):
     if total <= 1: return None
     btns = []
-    if page > 1:  btns.append(InlineKeyboardButton("◀ Prev", callback_data=f"{cmd}:{page-1}"))
+    if page > 1:     btns.append(InlineKeyboardButton("◀ Prev", callback_data=f"{cmd}:{page-1}"))
     if page < total: btns.append(InlineKeyboardButton("Next ▶", callback_data=f"{cmd}:{page+1}"))
     return InlineKeyboardMarkup([btns]) if btns else None
 
 def build_list_page(domains: list, page: int, site_name: str) -> str:
-    """
-    domains: list of (id, domain_name, full_url, is_blocked, checked_at)
-    """
     total_pages = max(1, (len(domains) + DOMAINS_PER_PAGE - 1) // DOMAINS_PER_PAGE)
     page = max(1, min(page, total_pages))
     start = (page - 1) * DOMAINS_PER_PAGE
@@ -69,7 +65,7 @@ def build_list_page(domains: list, page: int, site_name: str) -> str:
     block = sum(1 for _,_,_,b,_ in domains if b == 1)
     belum = sum(1 for _,_,_,b,_ in domains if b is None)
 
-    msg  = f"🎯 *DATA DOMAIN LIST*\n"
+    msg  = "🎯 *DATA DOMAIN LIST*\n"
     msg += f"`{'━'*30}`\n"
     msg += f"Site: `{esc(site_name)}`\n"
     msg += f"Halaman `{page}/{total_pages}`\n\n"
@@ -87,23 +83,19 @@ def build_list_page(domains: list, page: int, site_name: str) -> str:
         msg += f"├ Domain  : `{esc(domain_name)}`\n"
         msg += f"├ Status  : `{status_label(blocked)}`\n"
         msg += f"└ Checked : `{esc(checked or '—')}`\n\n"
-
     return msg
 
 def build_checkall_pages(results: list, site_name: str) -> list:
-    """results: [(domain_name, full_url, blocked, checked_at)]"""
     total = len(results)
     aman  = sum(1 for _,_,b,_ in results if not b)
     block = sum(1 for _,_,b,_ in results if b)
     now   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     total_pages = max(1, (total + DOMAINS_PER_PAGE - 1) // DOMAINS_PER_PAGE)
     pages = []
-
     for page in range(1, total_pages + 1):
         start = (page - 1) * DOMAINS_PER_PAGE
         chunk = results[start: start + DOMAINS_PER_PAGE]
-
-        msg  = f"🎯 *HASIL CEK DOMAIN*\n"
+        msg  = "🎯 *HASIL CEK DOMAIN*\n"
         msg += f"`{'━'*30}`\n"
         msg += f"Site: `{esc(site_name)}`\n"
         msg += f"Halaman `{page}/{total_pages}`\n\n"
@@ -112,7 +104,6 @@ def build_checkall_pages(results: list, site_name: str) -> list:
         msg += f"🟢 Aman       : `{aman}`\n"
         msg += f"🔴 Block      : `{block}`\n"
         msg += f"🕐 Waktu      : `{esc(now)}`\n\n"
-
         for i, (domain_name, full_url, blocked, checked) in enumerate(chunk):
             no = start + i + 1
             display = full_url if full_url else domain_name
@@ -121,14 +112,12 @@ def build_checkall_pages(results: list, site_name: str) -> list:
             msg += f"├ Domain  : `{esc(domain_name)}`\n"
             msg += f"├ Status  : `{status_label(blocked)}`\n"
             msg += f"└ Checked : `{esc(checked or now)}`\n\n"
-
         pages.append(msg)
-
     return pages
 
 def build_change_alert(changed: list, site_name: str) -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    msg  = f"⚠️ *PERUBAHAN STATUS DOMAIN*\n"
+    msg  = "⚠️ *PERUBAHAN STATUS DOMAIN*\n"
     msg += f"`{'━'*30}`\n"
     msg += f"Site: `{esc(site_name)}`\n"
     msg += f"🕐 `{esc(now)}`\n\n"
@@ -145,7 +134,6 @@ def build_change_alert(changed: list, site_name: str) -> str:
 async def run_auto_check(application: Application):
     domains = db.get_all_domains()
     if not domains: return
-
     settings = db.get_settings()
     chat_id = settings.get("chat_id")
     if not chat_id or not settings.get("alerts_active", True): return
@@ -159,13 +147,15 @@ async def run_auto_check(application: Application):
             changed.append((dname, full_url, prev, blocked))
 
     if changed:
-        msg = build_change_alert(changed, get_site_name())
         try:
-            await application.bot.send_message(chat_id=chat_id, text=msg, parse_mode="MarkdownV2")
+            await application.bot.send_message(
+                chat_id=chat_id,
+                text=build_change_alert(changed, get_site_name()),
+                parse_mode="MarkdownV2"
+            )
         except Exception as e:
             logger.error(f"Gagal kirim notifikasi: {e}")
-
-    logger.info(f"[AUTO CHECK] Selesai. {len(changed)} domain berubah status.")
+    logger.info(f"[AUTO CHECK] Selesai. {len(changed)} domain berubah.")
 
 def schedule_auto_check(application: Application, interval_minutes: int):
     global auto_check_job
@@ -198,7 +188,6 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📋 *Daftar Perintah yang Tersedia*\n\n"
             "*🔹 Domain:*\n"
             "`/domain add <link>` — Tambah link/domain\n"
-            "  _Contoh: /domain add mez\\.ink/ruangwd_\n\n"
             "`/domain delete <domain>` — Hapus domain\n"
             "`/domain update <lama> <baru>` — Ubah domain\n"
             "`/domain list` — Tampilkan daftar domain\n"
@@ -208,6 +197,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "*🔹 Manual:*\n"
             "`/check <link>` — Cek satu link/domain\n"
             "`/checkall` — Cek semua domain\n\n"
+            "*🔹 Import:*\n"
+            "Kirim file `.txt` + caption `/domain import`\n\n"
             "*🔹 Lainnya:*\n"
             "`/status` — Status bot\n"
             "`/start` — Daftarkan chat\n",
@@ -222,7 +213,6 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `-hh, --h` Daftar Perintah yang tersedia\n\n"
         "*Contoh Cepat:*\n"
         "`/domain add mez.ink/ruangwd`\n"
-        "`/domain add heylink.me/RUANGWD`\n"
         "`/domain list`\n"
         "`/check mez.ink/ruangwd`\n\n"
         "Ketik `/help -hh` untuk daftar perintah lengkap.",
@@ -234,31 +224,22 @@ async def cmd_domain(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not args:
         await update.message.reply_text("❌ Sub-command diperlukan. Lihat `/help -hh`", parse_mode="Markdown")
         return
-
     sub = args[0].lower()
 
-    # ── ADD ──
     if sub == "add":
         if len(args) < 2:
-            await update.message.reply_text(
-                "❌ Gunakan: `/domain add <link>`\nContoh: `/domain add mez.ink/ruangwd`",
-                parse_mode="Markdown"
-            )
+            await update.message.reply_text("❌ Gunakan: `/domain add <link>`\nContoh: `/domain add mez.ink/ruangwd`", parse_mode="Markdown")
             return
-
-        full_url = args[1].strip().replace("https://", "").replace("http://", "").rstrip("/")
+        full_url = args[1].strip().replace("https://","").replace("http://","").rstrip("/")
         domain_name = extract_domain(full_url)
-
         if db.domain_exists(domain_name):
             await update.message.reply_text(f"⚠️ Domain `{domain_name}` sudah ada.", parse_mode="Markdown")
             return
-
         db.add_domain(domain_name, full_url)
         tmp = await update.message.reply_text(f"⏳ Mengecek `{esc(full_url)}`\\.\\.\\.", parse_mode="MarkdownV2")
         blocked = await checker.check(domain_name)
         db.update_domain_status_by_name(domain_name, blocked)
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
         await tmp.edit_text(
             f"✅ *Domain ditambahkan\\!*\n\n"
             f"{status_icon(blocked)} *DOMAIN BARU*\n"
@@ -269,20 +250,17 @@ async def cmd_domain(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="MarkdownV2"
         )
 
-    # ── DELETE ──
     elif sub == "delete":
         if len(args) < 2:
             await update.message.reply_text("❌ Gunakan: `/domain delete <domain>`", parse_mode="Markdown")
             return
-        raw = args[1].strip()
-        domain_name = extract_domain(raw)
+        domain_name = extract_domain(args[1].strip())
         if not db.domain_exists(domain_name):
             await update.message.reply_text(f"❌ Domain `{domain_name}` tidak ditemukan.", parse_mode="Markdown")
             return
         db.delete_domain(domain_name)
         await update.message.reply_text(f"🗑️ Domain `{domain_name}` dihapus.", parse_mode="Markdown")
 
-    # ── UPDATE ──
     elif sub == "update":
         if len(args) < 3:
             await update.message.reply_text("❌ Gunakan: `/domain update <link_lama> <link_baru>`", parse_mode="Markdown")
@@ -300,7 +278,6 @@ async def cmd_domain(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.update_domain_name(old_domain, new_domain, new_url)
         await update.message.reply_text(f"✏️ `{old_url}` → `{new_url}`", parse_mode="Markdown")
 
-    # ── LIST ──
     elif sub == "list":
         domains = db.get_all_domains()
         if not domains:
@@ -312,7 +289,6 @@ async def cmd_domain(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = page_keyboard(1, total_pages, "list")
         await update.message.reply_text(text, parse_mode="MarkdownV2", reply_markup=kb)
 
-    # ── INTERVAL ──
     elif sub == "interval":
         if len(args) < 2:
             await update.message.reply_text("❌ Gunakan: `/domain interval <menit>`", parse_mode="Markdown")
@@ -325,31 +301,38 @@ async def cmd_domain(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         db.save_setting("interval_minutes", minutes)
         schedule_auto_check(context.application, minutes)
-        await update.message.reply_text(
-            f"⏱️ Interval diubah ke *{minutes} menit*\\. Auto check aktif\\!",
-            parse_mode="MarkdownV2"
-        )
+        await update.message.reply_text(f"⏱️ Interval diubah ke *{minutes} menit*\\. Auto check aktif\\!", parse_mode="MarkdownV2")
 
-    # ── STOP ──
     elif sub == "stop":
         db.save_setting("alerts_active", False)
         if auto_check_job:
             try: auto_check_job.pause()
             except: pass
         await update.message.reply_text(
-            "🔕 Semua alert *dihentikan*\\.\n"
-            "Gunakan `/domain interval <menit>` untuk aktifkan kembali\\.",
+            "🔕 Semua alert *dihentikan*\\.\nGunakan `/domain interval <menit>` untuk aktifkan kembali\\.",
             parse_mode="MarkdownV2"
         )
 
-    # ── SETSITE ──
     elif sub == "setsite":
         if len(args) < 2:
             await update.message.reply_text("❌ Gunakan: `/domain setsite <nama>`", parse_mode="Markdown")
             return
         site = " ".join(args[1:])
         db.save_setting("site_name", site)
-        await update.message.reply_text(f"✅ Nama site: `{site}`", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ Nama site diset ke: `{site}`", parse_mode="Markdown")
+
+    elif sub == "import":
+        await update.message.reply_text(
+            "📥 *Cara Import Domain dari File:*\n\n"
+            "1\\. Siapkan file `.txt` berisi daftar link, satu per baris\n"
+            "2\\. Kirim file ke grup ini\n"
+            "3\\. Di kolom *caption*, ketik: `/domain import`\n\n"
+            "Contoh isi file:\n"
+            "`ruangwd88\\.com`\n"
+            "`mez\\.ink/ruangwd`\n"
+            "`heylink\\.me/RUANGWD`",
+            parse_mode="MarkdownV2"
+        )
 
     else:
         await update.message.reply_text(f"❓ Sub-command `{sub}` tidak dikenal.", parse_mode="Markdown")
@@ -357,20 +340,15 @@ async def cmd_domain(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text(
-            "❌ Gunakan: `/check <link>`\nContoh: `/check mez.ink/ruangwd`",
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text("❌ Gunakan: `/check <link>`", parse_mode="Markdown")
         return
     full_url = context.args[0].strip().replace("https://","").replace("http://","").rstrip("/")
     domain_name = extract_domain(full_url)
-
     tmp = await update.message.reply_text(f"⏳ Mengecek `{esc(full_url)}`\\.\\.\\.", parse_mode="MarkdownV2")
     blocked = await checker.check(domain_name)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     if db.domain_exists(domain_name):
         db.update_domain_status_by_name(domain_name, blocked)
-
     await tmp.edit_text(
         f"🔍 *HASIL CEK MANUAL*\n"
         f"`{'━'*30}`\n"
@@ -381,7 +359,6 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"└ Checked : `{esc(now)}`",
         parse_mode="MarkdownV2"
     )
-
 
 async def cmd_checkall(update: Update, context: ContextTypes.DEFAULT_TYPE):
     domains = db.get_all_domains()
@@ -394,7 +371,6 @@ async def cmd_checkall(update: Update, context: ContextTypes.DEFAULT_TYPE):
         blocked = await checker.check(dname)
         db.update_domain_status(did, blocked)
         results.append((dname, full_url, blocked, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-
     site = get_site_name()
     pages = build_checkall_pages(results, site)
     total_pages = len(pages)
@@ -403,7 +379,6 @@ async def cmd_checkall(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i, pt in enumerate(pages[1:], 2):
         kb = page_keyboard(i, total_pages, "checkall")
         await update.message.reply_text(pt, parse_mode="MarkdownV2", reply_markup=kb)
-
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     s = db.get_settings()
@@ -422,6 +397,69 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ── IMPORT FILE HANDLER ───────────────────────────────────────────────────────
+
+async def cmd_domain_import(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Upload file .txt ke grup dengan caption /domain import"""
+    msg = update.message
+    doc = msg.document if msg else None
+
+    if not doc:
+        await update.message.reply_text(
+            "📥 Kirim file `.txt` ke grup ini dengan caption `/domain import`",
+            parse_mode="Markdown"
+        )
+        return
+
+    if not doc.file_name.endswith(".txt"):
+        await update.message.reply_text("❌ Hanya file `.txt` yang didukung.", parse_mode="Markdown")
+        return
+
+    tmp = await update.message.reply_text("⏳ Membaca file dan mengimport domain\\.\\.\\.", parse_mode="MarkdownV2")
+
+    file = await doc.get_file()
+    content_bytes = await file.download_as_bytearray()
+    content = content_bytes.decode("utf-8", errors="ignore")
+
+    added = []
+    skipped = []
+    errors = []
+
+    for line in content.splitlines():
+        url = line.strip().replace("\r", "")
+        if not url or url.startswith("#"):
+            continue
+        full_url = url.replace("https://","").replace("http://","").rstrip("/")
+        domain_name = extract_domain(full_url)
+        if not domain_name:
+            errors.append(url)
+            continue
+        if db.domain_exists(domain_name):
+            skipped.append(full_url)
+            continue
+        db.add_domain(domain_name, full_url)
+        added.append((domain_name, full_url))
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    report  = "📥 *HASIL IMPORT DOMAIN*\n"
+    report += f"`{'━'*30}`\n"
+    report += f"🕐 `{esc(now)}`\n\n"
+    report += f"✅ Ditambahkan : `{len(added)}`\n"
+    report += f"⏭️  Sudah ada   : `{len(skipped)}`\n"
+    report += f"❌ Error       : `{len(errors)}`\n"
+    report += f"📋 Total DB    : `{db.get_domain_count()}`\n\n"
+
+    if added:
+        report += "*Domain baru:*\n"
+        for _, full_url in added[:20]:
+            report += f"• `{esc(full_url)}`\n"
+        if len(added) > 20:
+            report += f"_\\.\\.\\. dan {len(added)-20} lainnya_\n"
+
+    report += "\n💡 Gunakan `/checkall` untuk cek semua domain\\."
+    await tmp.edit_text(report, parse_mode="MarkdownV2")
+
+
 # ── CALLBACK PAGINATION ───────────────────────────────────────────────────────
 
 async def cb_pagination(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -432,7 +470,6 @@ async def cb_pagination(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cmd, page_str = parts
     try: page = int(page_str)
     except: return
-
     site = get_site_name()
 
     if cmd == "list":
@@ -482,92 +519,13 @@ def main():
     app.add_handler(CommandHandler("checkall", cmd_checkall))
     app.add_handler(CommandHandler("status",   cmd_status))
     app.add_handler(CallbackQueryHandler(cb_pagination))
-    app.add_handler(MessageHandler(filters.Document.TXT & filters.CaptionRegex(r"^/domain import"), cmd_domain_import))
+    app.add_handler(MessageHandler(
+        filters.Document.TXT & filters.CaptionRegex(r"^/domain import"),
+        cmd_domain_import
+    ))
     app.add_error_handler(error_handler)
     logger.info("🚀 Bot Nawala Checker dimulai...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
-
-
-# ── IMPORT FILE HANDLER ───────────────────────────────────────────────────────
-# Tambahkan ini di bawah semua handler yang ada
-
-async def cmd_domain_import(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Handler untuk import domain dari file .txt yang dikirim ke chat.
-    Cara pakai: kirim file .txt ke grup, caption: /domain import
-    """
-    from nawala_checker import extract_domain
-
-    # Cek apakah ada file yang dikirim bersama command
-    msg = update.message
-    doc = msg.document if msg else None
-
-    if not doc:
-        await update.message.reply_text(
-            "📥 *Cara Import Domain dari File:*\n\n"
-            "1\\. Siapkan file `.txt` berisi daftar link, satu per baris\n"
-            "2\\. Kirim file tersebut ke grup ini\n"
-            "3\\. Di kolom *caption*, ketik: `/domain import`\n\n"
-            "Contoh isi file:\n"
-            "`ruangwd88\\.com`\n"
-            "`mez\\.ink/ruangwd`\n"
-            "`heylink\\.me/RUANGWD`",
-            parse_mode="MarkdownV2"
-        )
-        return
-
-    if not doc.file_name.endswith(".txt"):
-        await update.message.reply_text("❌ Hanya file `.txt` yang didukung.", parse_mode="Markdown")
-        return
-
-    tmp = await update.message.reply_text("⏳ Membaca file dan mengimport domain\\.\\.\\.", parse_mode="MarkdownV2")
-
-    # Download file
-    file = await doc.get_file()
-    content_bytes = await file.download_as_bytearray()
-    content = content_bytes.decode("utf-8", errors="ignore")
-
-    # Parse
-    added = []
-    skipped = []
-    errors = []
-
-    for line in content.splitlines():
-        url = line.strip().replace("\r", "")
-        if not url or url.startswith("#"):
-            continue
-        full_url = url.replace("https://", "").replace("http://", "").rstrip("/")
-        domain_name = extract_domain(full_url)
-        if not domain_name:
-            errors.append(url)
-            continue
-        if db.domain_exists(domain_name):
-            skipped.append(full_url)
-            continue
-        db.add_domain(domain_name, full_url)
-        added.append((domain_name, full_url))
-
-    total = db.get_domain_count()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    report  = f"📥 *HASIL IMPORT DOMAIN*\n"
-    report += f"`{'━'*30}`\n"
-    report += f"🕐 `{esc(now)}`\n\n"
-    report += f"✅ Ditambahkan : `{len(added)}`\n"
-    report += f"⏭️  Sudah ada   : `{len(skipped)}`\n"
-    report += f"❌ Error       : `{len(errors)}`\n"
-    report += f"📋 Total DB    : `{total}`\n\n"
-
-    if added:
-        report += f"*Domain baru ditambahkan:*\n"
-        for _, full_url in added[:20]:  # tampilkan maks 20
-            report += f"• `{esc(full_url)}`\n"
-        if len(added) > 20:
-            report += f"_\\.\\.\\. dan {len(added)-20} lainnya_\n"
-
-    report += f"\n💡 Gunakan `/checkall` untuk langsung cek semua domain\\."
-
-    await tmp.edit_text(report, parse_mode="MarkdownV2")
