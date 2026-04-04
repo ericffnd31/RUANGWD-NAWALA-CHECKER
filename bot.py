@@ -28,7 +28,7 @@ checker        = NawalaChecker()
 scheduler      = AsyncIOScheduler()
 auto_check_job = None
 PER_PAGE       = 10
-WIB            = ZoneInfo("Asia/Jakarta")   # UTC+7
+WIB            = ZoneInfo("Asia/Jakarta")
 
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
@@ -53,17 +53,18 @@ def t_label(domain_name: str) -> str:
 def site_name() -> str:
     return db.get_settings().get("site_name", "Default Site")
 
-def nav_kb(page: int, total: int, cmd: str, extra: str = ""):
-    """Tombol navigasi halaman."""
+def nav_kb(page: int, total: int, cmd: str):
     if total <= 1: return None
-    key = f"{cmd}:{extra}:" if extra else f"{cmd}::"
     btns = []
     if page > 1:
-        btns.append(InlineKeyboardButton("◀ Prev", callback_data=f"{key}{page-1}"))
-    btns.append(InlineKeyboardButton(f"{page}/{total}", callback_data="noop"))
+        btns.append(InlineKeyboardButton("◀ Prev", callback_data=f"{cmd}:{page-1}"))
+    btns.append(InlineKeyboardButton(f"· {page}/{total} ·", callback_data="noop"))
     if page < total:
-        btns.append(InlineKeyboardButton("Next ▶", callback_data=f"{key}{page+1}"))
+        btns.append(InlineKeyboardButton("Next ▶", callback_data=f"{cmd}:{page+1}"))
     return InlineKeyboardMarkup([btns])
+
+def normalize_url(raw: str) -> str:
+    return raw.strip().replace("https://","").replace("http://","").rstrip("/")
 
 
 # ── MESSAGE BUILDERS ──────────────────────────────────────────────────────────
@@ -100,19 +101,16 @@ def build_list_msg(domains: list, page: int) -> str:
 
 
 def build_checkall_msg(results: list, page: int) -> str:
-    """
-    results: [(domain_name, full_url, blocked, reason, checked_at)]
-    Satu pesan, navigasi via tombol.
-    """
+    """results: [(domain_name, full_url, blocked, reason, checked_at)]"""
     sn      = site_name()
     total_p = max(1, (len(results) + PER_PAGE - 1) // PER_PAGE)
     page    = max(1, min(page, total_p))
     start   = (page - 1) * PER_PAGE
     chunk   = results[start: start + PER_PAGE]
 
-    aman    = sum(1 for _,_,b,_,_ in results if not b)
-    block   = sum(1 for _,_,b,_,_ in results if b)
-    now     = now_wib()
+    aman  = sum(1 for _,_,b,_,_ in results if not b)
+    block = sum(1 for _,_,b,_,_ in results if b)
+    now   = now_wib()
 
     m  = "🎯 *HASIL CEK DOMAIN*\n"
     m += f"`{'━'*30}`\n"
@@ -127,10 +125,10 @@ def build_checkall_msg(results: list, page: int) -> str:
     for i, (dname, furl, blocked, reason, checked) in enumerate(chunk):
         no      = start + i + 1
         display = furl if furl else dname
-        block_info = f" \\({esc(reason)}\\)" if blocked and reason else ""
+        reason_txt = f" \\({esc(reason)}\\)" if blocked and reason else ""
         m += f"{s_icon(blocked)} *{esc(t_label(dname))} \\#{no}*\n"
         m += f"├ Link    : `{esc(display)}`\n"
-        m += f"├ Status  : `{s_label(blocked)}`{block_info}\n"
+        m += f"├ Status  : `{s_label(blocked)}`{reason_txt}\n"
         m += f"└ Checked : `{esc(checked or now)}`\n\n"
     return m
 
@@ -141,7 +139,7 @@ def build_alert_msg(changed: list) -> str:
     m += f"Site : `{esc(site_name())}`\n"
     m += f"🕐 `{esc(now_wib())}`\n\n"
     for dname, furl, was, now_b, reason in changed:
-        display = furl if furl else dname
+        display    = furl if furl else dname
         reason_txt = f" \\({esc(reason)}\\)" if now_b and reason else ""
         m += f"🔄 `{esc(display)}`\n"
         m += f"├ Sebelum  : {s_icon(was)} `{s_label(was)}`\n"
@@ -158,9 +156,14 @@ async def run_auto_check(application: Application):
     chat_id = s.get("chat_id")
     if not chat_id or not s.get("alerts_active", True): return
 
+    # Kelompokkan per domain_name agar DNS hanya dicek sekali
+    checked_cache: dict[str, tuple[bool, str]] = {}
     changed = []
+
     for did, dname, furl, prev, _ in domains:
-        blocked, reason = await checker.check_detail(dname)
+        if dname not in checked_cache:
+            checked_cache[dname] = await checker.check_detail(dname)
+        blocked, reason = checked_cache[dname]
         db.update_status_by_id(did, blocked)
         p = bool(prev) if prev is not None else None
         if p is not None and p != blocked:
@@ -169,13 +172,10 @@ async def run_auto_check(application: Application):
     if changed:
         try:
             await application.bot.send_message(
-                chat_id=chat_id,
-                text=build_alert_msg(changed),
-                parse_mode="MarkdownV2"
+                chat_id=chat_id, text=build_alert_msg(changed), parse_mode="MarkdownV2"
             )
         except Exception as e:
             logger.error(f"Alert error: {e}")
-
     logger.info(f"Auto check selesai — {len(changed)} berubah.")
 
 
@@ -199,9 +199,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.save_chat_id(update.effective_chat.id)
     await update.message.reply_text(
         "👋 *Selamat datang di Nawala Checker Bot\\!*\n\n"
-        "Bot ini mengecek domain terhadap:\n"
+        "Bot mengecek domain terhadap:\n"
         "🔸 *Nawala* \\(DNS 180\\.131\\.144\\.144\\)\n"
-        "🔸 *Trustpositif / Internet Positif* \\(Kominfo\\)\n\n"
+        "🔸 *Trustpositif / Internet Positif*\n\n"
         "Ketik /help untuk panduan\\.",
         parse_mode="MarkdownV2"
     )
@@ -216,8 +216,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "*Domain & IP:*\n"
             "`/domain add <link>` — tambah 1 link/IP\n"
             "`/domain add <l1> <l2> ...` — tambah banyak\n"
-            "`/domain delete <domain/IP>` — hapus\n"
-            "`/domain update <lama> <baru>` — ubah\n"
+            "`/domain delete <link>` — hapus link\n"
             "`/domain list` — daftar semua\n"
             "`/domain interval <menit>` — ubah interval\n"
             "`/domain stop` — hentikan alert\n"
@@ -235,9 +234,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📖 *Panduan Bot*\n\n"
         "`/domain add mez.ink/ruangwd`\n"
         "`/domain add 146.190.92.3`\n"
-        "`/domain list`\n"
-        "`/check 146.190.92.3`\n"
-        "`/checkall`\n\n"
+        "`/domain list` — daftar semua\n"
+        "`/checkall` — cek semua sekarang\n\n"
         "Ketik `/help -hh` untuk semua perintah.",
         parse_mode="Markdown"
     )
@@ -264,17 +262,17 @@ async def cmd_domain(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Single
         if len(raw_list) == 1:
-            furl  = raw_list[0].strip().replace("https://","").replace("http://","").rstrip("/")
+            furl  = normalize_url(raw_list[0])
             dname = extract_domain(furl)
-            if db.domain_exists(dname):
-                await update.message.reply_text(f"⚠️ `{dname}` sudah ada.", parse_mode="Markdown")
+            if db.url_exists(furl):
+                await update.message.reply_text(f"⚠️ Link `{furl}` sudah ada.", parse_mode="Markdown")
                 return
             db.add_domain(dname, furl)
             tmp = await update.message.reply_text(
                 f"⏳ Menyimpan dan mengecek `{esc(furl)}`\\.\\.\\.", parse_mode="MarkdownV2"
             )
             blocked, reason = await checker.check_detail(dname)
-            db.update_status_by_name(dname, blocked)
+            db.update_status_by_url(furl, blocked)
             reason_txt = f" \\({esc(reason)}\\)" if blocked and reason else ""
             await tmp.edit_text(
                 f"✅ *{esc(t_label(dname))} ditambahkan\\!*\n\n"
@@ -294,10 +292,10 @@ async def cmd_domain(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for raw in raw_list:
                 raw = raw.strip()
                 if not raw: continue
-                furl  = raw.replace("https://","").replace("http://","").rstrip("/")
+                furl  = normalize_url(raw)
                 dname = extract_domain(furl)
                 if not dname: errors.append(raw); continue
-                if db.domain_exists(dname): skipped.append(furl); continue
+                if db.url_exists(furl): skipped.append(furl); continue
                 db.add_domain(dname, furl)
                 added.append((dname, furl))
 
@@ -321,36 +319,21 @@ async def cmd_domain(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── delete ──
     elif sub == "delete":
         if len(args) < 2:
-            await update.message.reply_text("❌ `/domain delete <domain/IP>`", parse_mode="Markdown"); return
-        dname = extract_domain(args[1].strip())
-        if not db.domain_exists(dname):
-            await update.message.reply_text(f"❌ `{dname}` tidak ditemukan.", parse_mode="Markdown"); return
-        db.delete_domain(dname)
-        await update.message.reply_text(f"🗑️ `{dname}` dihapus.", parse_mode="Markdown")
-
-    # ── update ──
-    elif sub == "update":
-        if len(args) < 3:
-            await update.message.reply_text("❌ `/domain update <lama> <baru>`", parse_mode="Markdown"); return
-        old_d = extract_domain(args[1].strip())
-        new_u = args[2].strip().replace("https://","").replace("http://","").rstrip("/")
-        new_d = extract_domain(new_u)
-        if not db.domain_exists(old_d):
-            await update.message.reply_text(f"❌ `{old_d}` tidak ditemukan.", parse_mode="Markdown"); return
-        if db.domain_exists(new_d):
-            await update.message.reply_text(f"⚠️ `{new_d}` sudah ada.", parse_mode="Markdown"); return
-        db.update_domain_name(old_d, new_d, new_u)
-        await update.message.reply_text(f"✏️ `{old_d}` → `{new_d}`", parse_mode="Markdown")
+            await update.message.reply_text("❌ `/domain delete <link>`", parse_mode="Markdown"); return
+        furl = normalize_url(args[1].strip())
+        if not db.url_exists(furl):
+            await update.message.reply_text(f"❌ `{furl}` tidak ditemukan.", parse_mode="Markdown"); return
+        db.delete_domain_by_url(furl)
+        await update.message.reply_text(f"🗑️ `{furl}` dihapus.", parse_mode="Markdown")
 
     # ── list ──
     elif sub == "list":
         domains = db.get_all_domains()
         if not domains:
-            await update.message.reply_text("📭 Belum ada domain. Gunakan `/domain add <link>`", parse_mode="Markdown"); return
+            await update.message.reply_text("📭 Belum ada domain.", parse_mode="Markdown"); return
         total_p = max(1, (len(domains) + PER_PAGE - 1) // PER_PAGE)
         await update.message.reply_text(
-            build_list_msg(domains, 1),
-            parse_mode="MarkdownV2",
+            build_list_msg(domains, 1), parse_mode="MarkdownV2",
             reply_markup=nav_kb(1, total_p, "list")
         )
 
@@ -393,8 +376,8 @@ async def cmd_domain(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "📥 *Cara Import:*\n\n"
             "1\\. Siapkan file `.txt` \\(satu link per baris\\)\n"
-            "2\\. Kirim file ke grup ini\n"
-            "3\\. Di caption ketik: `/domain import`",
+            "2\\. Kirim file ke grup\n"
+            "3\\. Caption: `/domain import`",
             parse_mode="MarkdownV2"
         )
     else:
@@ -406,19 +389,19 @@ async def cmd_domain(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("❌ Gunakan: `/check <link/IP>`", parse_mode="Markdown"); return
-    raw   = context.args[0].strip().replace("https://","").replace("http://","").rstrip("/")
-    dname = extract_domain(raw)
+    furl  = normalize_url(context.args[0])
+    dname = extract_domain(furl)
     metode = "HTTP Request" if is_ip_address(dname) else "DNS Lookup"
-    tmp = await update.message.reply_text(f"⏳ Mengecek `{esc(raw)}`\\.\\.\\.", parse_mode="MarkdownV2")
+    tmp = await update.message.reply_text(f"⏳ Mengecek `{esc(furl)}`\\.\\.\\.", parse_mode="MarkdownV2")
     blocked, reason = await checker.check_detail(dname)
-    if db.domain_exists(dname):
-        db.update_status_by_name(dname, blocked)
+    if db.url_exists(furl):
+        db.update_status_by_url(furl, blocked)
     reason_txt = f" \\({esc(reason)}\\)" if blocked and reason else ""
     await tmp.edit_text(
         f"🔍 *HASIL CEK MANUAL*\n"
         f"`{'━'*30}`\n"
         f"{s_icon(blocked)} *{esc(t_label(dname))}*\n"
-        f"├ Link    : `{esc(raw)}`\n"
+        f"├ Link    : `{esc(furl)}`\n"
         f"├ Metode  : `{metode}`\n"
         f"├ Status  : `{s_label(blocked)}`{reason_txt}\n"
         f"└ Checked : `{esc(now_wib())}`",
@@ -426,7 +409,7 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ── /checkall — SATU PESAN + navigasi ────────────────────────────────────────
+# ── /checkall — satu pesan + navigasi ────────────────────────────────────────
 
 async def cmd_checkall(update: Update, context: ContextTypes.DEFAULT_TYPE):
     domains = db.get_all_domains()
@@ -434,21 +417,23 @@ async def cmd_checkall(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 Belum ada domain.", parse_mode="Markdown"); return
 
     tmp = await update.message.reply_text(
-        f"⏳ Mengecek `{len(domains)}` domain \\& IP\\.\\.\\.", parse_mode="MarkdownV2"
+        f"⏳ Mengecek `{len(domains)}` link\\.\\.\\.", parse_mode="MarkdownV2"
     )
+
+    # Cache DNS check per domain_name agar domain yg sama tidak dicek 2x
+    cache: dict[str, tuple[bool, str]] = {}
     results = []
     for did, dname, furl, _, _ in domains:
-        blocked, reason = await checker.check_detail(dname)
+        if dname not in cache:
+            cache[dname] = await checker.check_detail(dname)
+        blocked, reason = cache[dname]
         db.update_status_by_id(did, blocked)
         results.append((dname, furl, blocked, reason, now_wib()))
 
-    # Simpan hasil di context.bot_data agar bisa diakses callback
     context.bot_data["checkall_results"] = results
-
     total_p = max(1, (len(results) + PER_PAGE - 1) // PER_PAGE)
     await tmp.edit_text(
-        build_checkall_msg(results, 1),
-        parse_mode="MarkdownV2",
+        build_checkall_msg(results, 1), parse_mode="MarkdownV2",
         reply_markup=nav_kb(1, total_p, "checkall")
     )
 
@@ -465,12 +450,12 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"🤖 *STATUS BOT*\n"
         f"`{'━'*30}`\n"
-        f"📋 Domain\\+IP    : `{db.get_domain_count()}`\n"
+        f"📋 Total link    : `{db.get_domain_count()}`\n"
         f"🌐 Site          : `{esc(s.get('site_name','—'))}`\n"
         f"⏱️  Interval       : `{s.get('interval_minutes', DEFAULT_INTERVAL_MINUTES)} menit`\n"
         f"🔔 Alert          : {al}\n"
         f"⏰ Cek berikutnya : `{esc(nxt)}`\n\n"
-        f"🛡️ Cakupan pemblokiran:\n"
+        f"🛡️ Cakupan:\n"
         f"  • Nawala \\(DNS 180\\.131\\.144\\.144\\)\n"
         f"  • Trustpositif / Internet Positif",
         parse_mode="MarkdownV2"
@@ -495,10 +480,10 @@ async def cmd_domain_import(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for line in content.splitlines():
         url = line.strip().replace("\r","")
         if not url or url.startswith("#"): continue
-        furl  = url.replace("https://","").replace("http://","").rstrip("/")
+        furl  = normalize_url(url)
         dname = extract_domain(furl)
         if not dname: errors.append(url); continue
-        if db.domain_exists(dname): skipped.append(furl); continue
+        if db.url_exists(furl): skipped.append(furl); continue
         db.add_domain(dname, furl)
         added.append((dname, furl))
 
@@ -525,14 +510,9 @@ async def cmd_domain_import(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cb_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
-    if query.data == "noop":
-        return
-
+    if query.data == "noop": return
     try:
-        parts = query.data.split(":")
-        # format: "cmd::page"
-        cmd, _, page_s = parts
+        cmd, page_s = query.data.split(":")
         page = int(page_s)
     except Exception:
         return
@@ -542,23 +522,19 @@ async def cb_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not domains: return
         total_p = max(1, (len(domains) + PER_PAGE - 1) // PER_PAGE)
         await query.edit_message_text(
-            build_list_msg(domains, page),
-            parse_mode="MarkdownV2",
+            build_list_msg(domains, page), parse_mode="MarkdownV2",
             reply_markup=nav_kb(page, total_p, "list")
         )
-
     elif cmd == "checkall":
         results = context.bot_data.get("checkall_results")
         if not results:
-            # fallback: ambil dari DB tanpa re-check
             domains = db.get_all_domains()
             results = [(d[1], d[2], bool(d[3]) if d[3] is not None else False,
                         "", d[4] or "—") for d in domains]
         total_p = max(1, (len(results) + PER_PAGE - 1) // PER_PAGE)
         if not (1 <= page <= total_p): return
         await query.edit_message_text(
-            build_checkall_msg(results, page),
-            parse_mode="MarkdownV2",
+            build_checkall_msg(results, page), parse_mode="MarkdownV2",
             reply_markup=nav_kb(page, total_p, "checkall")
         )
 
