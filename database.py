@@ -1,19 +1,19 @@
 """
 Database SQLite — Nawala Bot
-Unique key: full_url (bukan domain_name)
-Sehingga ruangwd80742.com, ruangwd80742.com/blog, ruangwd80742.com/rtp
-tersimpan sebagai 3 entry terpisah, DNS check via domain_name.
+Unique key: full_url  →  33 link berbeda = 33 row berbeda
 """
 
 import os
 import sqlite3
 import logging
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
 _VOL    = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "")
 DB_FILE = os.path.join(_VOL, "nawala_bot.db") if _VOL else "nawala_bot.db"
+WIB     = ZoneInfo("Asia/Jakarta")
 
 
 def _conn():
@@ -25,11 +25,12 @@ def _conn():
 
 def init_db():
     with _conn() as c:
+        # Buat tabel baru jika belum ada
         c.executescript("""
             CREATE TABLE IF NOT EXISTS domains (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 domain_name TEXT    NOT NULL,
-                full_url    TEXT    NOT NULL UNIQUE,
+                full_url    TEXT    NOT NULL DEFAULT '',
                 is_blocked  INTEGER,
                 checked_at  TEXT,
                 created_at  TEXT DEFAULT (datetime('now','localtime'))
@@ -39,35 +40,48 @@ def init_db():
                 value TEXT NOT NULL
             );
         """)
-        # Migrasi dari versi lama (unique domain_name → unique full_url)
-        # Tambah kolom jika belum ada
-        try:
+
+        # ── MIGRASI: pastikan full_url UNIQUE ────────────────────────────────
+        # Cek apakah kolom full_url sudah ada
+        cols = [r[1] for r in c.execute("PRAGMA table_info(domains)").fetchall()]
+        if "full_url" not in cols:
             c.execute("ALTER TABLE domains ADD COLUMN full_url TEXT NOT NULL DEFAULT ''")
-        except Exception:
-            pass
-        # Hapus unique constraint lama jika ada & buat index baru
-        # (SQLite tidak support DROP CONSTRAINT, tapi CREATE TABLE IF NOT EXISTS sudah benar)
-    logger.info(f"DB: {DB_FILE}")
+            # Isi full_url dari domain_name untuk data lama
+            c.execute("UPDATE domains SET full_url = domain_name WHERE full_url = ''")
+
+        # Cek apakah unique index pada full_url sudah ada
+        indexes = [r[1] for r in c.execute("PRAGMA index_list(domains)").fetchall()]
+        if "idx_full_url" not in indexes:
+            # Hapus duplikat full_url sebelum buat index
+            c.execute("""
+                DELETE FROM domains WHERE id NOT IN (
+                    SELECT MIN(id) FROM domains GROUP BY full_url
+                )
+            """)
+            c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_full_url ON domains(full_url)")
+
+    logger.info(f"DB ready: {DB_FILE}")
+
+
+def now_wib() -> str:
+    return datetime.now(WIB).strftime("%Y-%m-%d %H:%M WIB")
 
 
 # ── DOMAIN ────────────────────────────────────────────────────────────────────
 
 def url_exists(full_url: str) -> bool:
-    """Cek berdasarkan full_url (bukan domain_name)."""
     with _conn() as c:
         return c.execute(
             "SELECT 1 FROM domains WHERE full_url=?", (full_url,)
         ).fetchone() is not None
 
 def domain_exists(domain_name: str) -> bool:
-    """Backward compat — cek domain_name."""
     with _conn() as c:
         return c.execute(
             "SELECT 1 FROM domains WHERE domain_name=?", (domain_name,)
         ).fetchone() is not None
 
 def add_domain(domain_name: str, full_url: str = ""):
-    """Simpan entry. Unique berdasarkan full_url."""
     furl = full_url or domain_name
     with _conn() as c:
         c.execute(
@@ -80,7 +94,6 @@ def delete_domain_by_url(full_url: str):
         c.execute("DELETE FROM domains WHERE full_url=?", (full_url,))
 
 def delete_domain(domain_name: str):
-    """Hapus semua entry dengan domain_name tsb."""
     with _conn() as c:
         c.execute("DELETE FROM domains WHERE domain_name=?", (domain_name,))
 
@@ -92,28 +105,24 @@ def update_domain_name(old_url: str, new_domain: str, new_url: str):
         )
 
 def update_status_by_id(domain_id: int, blocked: bool):
-    now = datetime.now().strftime("%Y-%m-%d %H:%M WIB")
     with _conn() as c:
         c.execute(
             "UPDATE domains SET is_blocked=?, checked_at=? WHERE id=?",
-            (1 if blocked else 0, now, domain_id)
+            (1 if blocked else 0, now_wib(), domain_id)
         )
 
 def update_status_by_name(domain_name: str, blocked: bool):
-    """Update semua entry dengan domain_name yang sama."""
-    now = datetime.now().strftime("%Y-%m-%d %H:%M WIB")
     with _conn() as c:
         c.execute(
             "UPDATE domains SET is_blocked=?, checked_at=? WHERE domain_name=?",
-            (1 if blocked else 0, now, domain_name)
+            (1 if blocked else 0, now_wib(), domain_name)
         )
 
 def update_status_by_url(full_url: str, blocked: bool):
-    now = datetime.now().strftime("%Y-%m-%d %H:%M WIB")
     with _conn() as c:
         c.execute(
             "UPDATE domains SET is_blocked=?, checked_at=? WHERE full_url=?",
-            (1 if blocked else 0, now, full_url)
+            (1 if blocked else 0, now_wib(), full_url)
         )
 
 def get_all_domains() -> list:
