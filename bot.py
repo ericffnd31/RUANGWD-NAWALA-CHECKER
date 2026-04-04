@@ -53,6 +53,9 @@ def t_label(domain_name: str) -> str:
 def site_name() -> str:
     return db.get_settings().get("site_name", "Default Site")
 
+def normalize_url(raw: str) -> str:
+    return raw.strip().replace("https://","").replace("http://","").rstrip("/")
+
 def nav_kb(page: int, total: int, cmd: str):
     if total <= 1: return None
     btns = []
@@ -62,9 +65,6 @@ def nav_kb(page: int, total: int, cmd: str):
     if page < total:
         btns.append(InlineKeyboardButton("Next ▶", callback_data=f"{cmd}:{page+1}"))
     return InlineKeyboardMarkup([btns])
-
-def normalize_url(raw: str) -> str:
-    return raw.strip().replace("https://","").replace("http://","").rstrip("/")
 
 
 # ── MESSAGE BUILDERS ──────────────────────────────────────────────────────────
@@ -89,7 +89,6 @@ def build_list_msg(domains: list, page: int) -> str:
     m += f"🟢 Aman       : `{aman}`\n"
     m += f"🔴 Block      : `{block}`\n"
     m += f"⚪ Belum Cek  : `{belum}`\n\n"
-
     for i, (_, dname, furl, blocked, checked) in enumerate(chunk):
         no      = start + i + 1
         display = furl if furl else dname
@@ -100,8 +99,11 @@ def build_list_msg(domains: list, page: int) -> str:
     return m
 
 
-def build_checkall_msg(results: list, page: int) -> str:
-    """results: [(domain_name, full_url, blocked, reason, checked_at)]"""
+def build_report_msg(results: list, page: int, title: str = "HASIL CEK DOMAIN") -> str:
+    """
+    results: [(domain_name, full_url, blocked, reason, checked_at)]
+    Dipakai untuk /checkall DAN laporan auto check.
+    """
     sn      = site_name()
     total_p = max(1, (len(results) + PER_PAGE - 1) // PER_PAGE)
     page    = max(1, min(page, total_p))
@@ -112,7 +114,7 @@ def build_checkall_msg(results: list, page: int) -> str:
     block = sum(1 for _,_,b,_,_ in results if b)
     now   = now_wib()
 
-    m  = "🎯 *HASIL CEK DOMAIN*\n"
+    m  = f"🎯 *{title}*\n"
     m += f"`{'━'*30}`\n"
     m += f"Site : `{esc(sn)}`\n"
     m += f"Hal  : `{page}/{total_p}`\n\n"
@@ -121,10 +123,9 @@ def build_checkall_msg(results: list, page: int) -> str:
     m += f"🟢 Aman       : `{aman}`\n"
     m += f"🔴 Block      : `{block}`\n"
     m += f"🕐 Waktu      : `{esc(now)}`\n\n"
-
     for i, (dname, furl, blocked, reason, checked) in enumerate(chunk):
-        no      = start + i + 1
-        display = furl if furl else dname
+        no         = start + i + 1
+        display    = furl if furl else dname
         reason_txt = f" \\({esc(reason)}\\)" if blocked and reason else ""
         m += f"{s_icon(blocked)} *{esc(t_label(dname))} \\#{no}*\n"
         m += f"├ Link    : `{esc(display)}`\n"
@@ -134,6 +135,7 @@ def build_checkall_msg(results: list, page: int) -> str:
 
 
 def build_alert_msg(changed: list) -> str:
+    """Notifikasi perubahan status."""
     m  = "⚠️ *PERUBAHAN STATUS DOMAIN*\n"
     m += f"`{'━'*30}`\n"
     m += f"Site : `{esc(site_name())}`\n"
@@ -156,27 +158,51 @@ async def run_auto_check(application: Application):
     chat_id = s.get("chat_id")
     if not chat_id or not s.get("alerts_active", True): return
 
-    # Kelompokkan per domain_name agar DNS hanya dicek sekali
-    checked_cache: dict[str, tuple[bool, str]] = {}
+    # Cache DNS per domain_name agar domain yg sama tidak dicek berkali-kali
+    cache: dict[str, tuple[bool, str]] = {}
+    results = []
     changed = []
 
     for did, dname, furl, prev, _ in domains:
-        if dname not in checked_cache:
-            checked_cache[dname] = await checker.check_detail(dname)
-        blocked, reason = checked_cache[dname]
+        if dname not in cache:
+            cache[dname] = await checker.check_detail(dname)
+        blocked, reason = cache[dname]
         db.update_status_by_id(did, blocked)
+
+        # Cek perubahan
         p = bool(prev) if prev is not None else None
         if p is not None and p != blocked:
             changed.append((dname, furl, p, blocked, reason))
 
+        results.append((dname, furl, blocked, reason, now_wib()))
+
+    # 1. Kirim notifikasi perubahan (jika ada)
     if changed:
         try:
             await application.bot.send_message(
-                chat_id=chat_id, text=build_alert_msg(changed), parse_mode="MarkdownV2"
+                chat_id=chat_id,
+                text=build_alert_msg(changed),
+                parse_mode="MarkdownV2"
             )
         except Exception as e:
             logger.error(f"Alert error: {e}")
-    logger.info(f"Auto check selesai — {len(changed)} berubah.")
+
+    # 2. Kirim laporan lengkap setiap interval
+    total_p = max(1, (len(results) + PER_PAGE - 1) // PER_PAGE)
+    try:
+        # Kirim halaman 1 dengan tombol navigasi
+        await application.bot.send_message(
+            chat_id=chat_id,
+            text=build_report_msg(results, 1, "LAPORAN AUTO CHECK"),
+            parse_mode="MarkdownV2",
+            reply_markup=nav_kb(1, total_p, "autocheck")
+        )
+        # Simpan hasil di bot_data agar callback bisa akses
+        application.bot_data["autocheck_results"] = results
+    except Exception as e:
+        logger.error(f"Laporan auto check error: {e}")
+
+    logger.info(f"Auto check selesai — {len(results)} link, {len(changed)} berubah.")
 
 
 def schedule_check(application: Application, minutes: int):
@@ -219,11 +245,11 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "`/domain delete <link>` — hapus link\n"
             "`/domain list` — daftar semua\n"
             "`/domain interval <menit>` — ubah interval\n"
-            "`/domain stop` — hentikan alert\n"
+            "`/domain stop` — hentikan laporan otomatis\n"
             "`/domain setsite <nama>` — set nama site\n\n"
             "*Cek Manual:*\n"
             "`/check <link/IP>` — cek satu\n"
-            "`/checkall` — cek semua\n\n"
+            "`/checkall` — cek semua sekarang\n\n"
             "*Import File:*\n"
             "Kirim file `.txt` + caption `/domain import`\n\n"
             "`/status` — status bot\n",
@@ -234,8 +260,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📖 *Panduan Bot*\n\n"
         "`/domain add mez.ink/ruangwd`\n"
         "`/domain add 146.190.92.3`\n"
-        "`/domain list` — daftar semua\n"
-        "`/checkall` — cek semua sekarang\n\n"
+        "`/domain list`\n"
+        "`/checkall`\n\n"
         "Ketik `/help -hh` untuk semua perintah.",
         parse_mode="Markdown"
     )
@@ -283,7 +309,7 @@ async def cmd_domain(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="MarkdownV2"
             )
 
-        # Multiple
+        # Multiple — simpan dulu, cek belakangan via /checkall
         else:
             tmp = await update.message.reply_text(
                 f"⏳ Menyimpan *{len(raw_list)} link*\\.\\.\\.", parse_mode="MarkdownV2"
@@ -313,14 +339,14 @@ async def cmd_domain(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     m += f"{icon} `{esc(furl)}`\n"
                 if len(added) > 20:
                     m += f"_\\.\\.\\. dan {len(added)-20} lainnya_\n"
-            m += "\n💡 Gunakan `/checkall` untuk cek semua\\."
+            m += "\n💡 Gunakan `/checkall` untuk cek status semua\\."
             await tmp.edit_text(m, parse_mode="MarkdownV2")
 
     # ── delete ──
     elif sub == "delete":
         if len(args) < 2:
             await update.message.reply_text("❌ `/domain delete <link>`", parse_mode="Markdown"); return
-        furl = normalize_url(args[1].strip())
+        furl = normalize_url(args[1])
         if not db.url_exists(furl):
             await update.message.reply_text(f"❌ `{furl}` tidak ditemukan.", parse_mode="Markdown"); return
         db.delete_domain_by_url(furl)
@@ -348,7 +374,8 @@ async def cmd_domain(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.save_setting("interval_minutes", minutes)
         schedule_check(context.application, minutes)
         await update.message.reply_text(
-            f"⏱️ Interval diubah ke *{minutes} menit*\\. Auto check aktif\\!",
+            f"⏱️ Interval diubah ke *{minutes} menit*\\.\n"
+            f"Laporan otomatis akan dikirim setiap *{minutes} menit*\\.",
             parse_mode="MarkdownV2"
         )
 
@@ -359,7 +386,8 @@ async def cmd_domain(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try: auto_check_job.pause()
             except: pass
         await update.message.reply_text(
-            "🔕 Alert *dihentikan*\\.\nGunakan `/domain interval <menit>` untuk aktifkan kembali\\.",
+            "🔕 Laporan otomatis *dihentikan*\\.\n"
+            "Gunakan `/domain interval <menit>` untuk aktifkan kembali\\.",
             parse_mode="MarkdownV2"
         )
 
@@ -389,8 +417,8 @@ async def cmd_domain(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("❌ Gunakan: `/check <link/IP>`", parse_mode="Markdown"); return
-    furl  = normalize_url(context.args[0])
-    dname = extract_domain(furl)
+    furl   = normalize_url(context.args[0])
+    dname  = extract_domain(furl)
     metode = "HTTP Request" if is_ip_address(dname) else "DNS Lookup"
     tmp = await update.message.reply_text(f"⏳ Mengecek `{esc(furl)}`\\.\\.\\.", parse_mode="MarkdownV2")
     blocked, reason = await checker.check_detail(dname)
@@ -409,7 +437,7 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ── /checkall — satu pesan + navigasi ────────────────────────────────────────
+# ── /checkall ─────────────────────────────────────────────────────────────────
 
 async def cmd_checkall(update: Update, context: ContextTypes.DEFAULT_TYPE):
     domains = db.get_all_domains()
@@ -419,8 +447,6 @@ async def cmd_checkall(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tmp = await update.message.reply_text(
         f"⏳ Mengecek `{len(domains)}` link\\.\\.\\.", parse_mode="MarkdownV2"
     )
-
-    # Cache DNS check per domain_name agar domain yg sama tidak dicek 2x
     cache: dict[str, tuple[bool, str]] = {}
     results = []
     for did, dname, furl, _, _ in domains:
@@ -433,7 +459,8 @@ async def cmd_checkall(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.bot_data["checkall_results"] = results
     total_p = max(1, (len(results) + PER_PAGE - 1) // PER_PAGE)
     await tmp.edit_text(
-        build_checkall_msg(results, 1), parse_mode="MarkdownV2",
+        build_report_msg(results, 1, "HASIL CEK DOMAIN"),
+        parse_mode="MarkdownV2",
         reply_markup=nav_kb(1, total_p, "checkall")
     )
 
@@ -453,8 +480,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📋 Total link    : `{db.get_domain_count()}`\n"
         f"🌐 Site          : `{esc(s.get('site_name','—'))}`\n"
         f"⏱️  Interval       : `{s.get('interval_minutes', DEFAULT_INTERVAL_MINUTES)} menit`\n"
-        f"🔔 Alert          : {al}\n"
-        f"⏰ Cek berikutnya : `{esc(nxt)}`\n\n"
+        f"🔔 Laporan otomatis : {al}\n"
+        f"⏰ Laporan berikutnya : `{esc(nxt)}`\n\n"
         f"🛡️ Cakupan:\n"
         f"  • Nawala \\(DNS 180\\.131\\.144\\.144\\)\n"
         f"  • Trustpositif / Internet Positif",
@@ -525,17 +552,21 @@ async def cb_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
             build_list_msg(domains, page), parse_mode="MarkdownV2",
             reply_markup=nav_kb(page, total_p, "list")
         )
-    elif cmd == "checkall":
-        results = context.bot_data.get("checkall_results")
+
+    elif cmd in ("checkall", "autocheck"):
+        key     = "checkall_results" if cmd == "checkall" else "autocheck_results"
+        results = context.bot_data.get(key)
         if not results:
+            # fallback dari DB
             domains = db.get_all_domains()
             results = [(d[1], d[2], bool(d[3]) if d[3] is not None else False,
                         "", d[4] or "—") for d in domains]
         total_p = max(1, (len(results) + PER_PAGE - 1) // PER_PAGE)
         if not (1 <= page <= total_p): return
+        title = "LAPORAN AUTO CHECK" if cmd == "autocheck" else "HASIL CEK DOMAIN"
         await query.edit_message_text(
-            build_checkall_msg(results, page), parse_mode="MarkdownV2",
-            reply_markup=nav_kb(page, total_p, "checkall")
+            build_report_msg(results, page, title), parse_mode="MarkdownV2",
+            reply_markup=nav_kb(page, total_p, cmd)
         )
 
 
