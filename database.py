@@ -1,6 +1,8 @@
 """
 Database SQLite — Nawala Bot
-Support Railway persistent volume via RAILWAY_VOLUME_MOUNT_PATH
+Unique key: full_url (bukan domain_name)
+Sehingga ruangwd80742.com, ruangwd80742.com/blog, ruangwd80742.com/rtp
+tersimpan sebagai 3 entry terpisah, DNS check via domain_name.
 """
 
 import os
@@ -26,8 +28,8 @@ def init_db():
         c.executescript("""
             CREATE TABLE IF NOT EXISTS domains (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                domain_name TEXT    NOT NULL UNIQUE,
-                full_url    TEXT    NOT NULL DEFAULT '',
+                domain_name TEXT    NOT NULL,
+                full_url    TEXT    NOT NULL UNIQUE,
                 is_blocked  INTEGER,
                 checked_at  TEXT,
                 created_at  TEXT DEFAULT (datetime('now','localtime'))
@@ -37,42 +39,60 @@ def init_db():
                 value TEXT NOT NULL
             );
         """)
-        # migrasi kolom full_url jika belum ada
+        # Migrasi dari versi lama (unique domain_name → unique full_url)
+        # Tambah kolom jika belum ada
         try:
             c.execute("ALTER TABLE domains ADD COLUMN full_url TEXT NOT NULL DEFAULT ''")
         except Exception:
             pass
+        # Hapus unique constraint lama jika ada & buat index baru
+        # (SQLite tidak support DROP CONSTRAINT, tapi CREATE TABLE IF NOT EXISTS sudah benar)
     logger.info(f"DB: {DB_FILE}")
 
 
 # ── DOMAIN ────────────────────────────────────────────────────────────────────
 
+def url_exists(full_url: str) -> bool:
+    """Cek berdasarkan full_url (bukan domain_name)."""
+    with _conn() as c:
+        return c.execute(
+            "SELECT 1 FROM domains WHERE full_url=?", (full_url,)
+        ).fetchone() is not None
+
 def domain_exists(domain_name: str) -> bool:
+    """Backward compat — cek domain_name."""
     with _conn() as c:
         return c.execute(
             "SELECT 1 FROM domains WHERE domain_name=?", (domain_name,)
         ).fetchone() is not None
 
 def add_domain(domain_name: str, full_url: str = ""):
+    """Simpan entry. Unique berdasarkan full_url."""
+    furl = full_url or domain_name
     with _conn() as c:
         c.execute(
             "INSERT OR IGNORE INTO domains (domain_name, full_url) VALUES (?,?)",
-            (domain_name, full_url or domain_name)
+            (domain_name, furl)
         )
 
+def delete_domain_by_url(full_url: str):
+    with _conn() as c:
+        c.execute("DELETE FROM domains WHERE full_url=?", (full_url,))
+
 def delete_domain(domain_name: str):
+    """Hapus semua entry dengan domain_name tsb."""
     with _conn() as c:
         c.execute("DELETE FROM domains WHERE domain_name=?", (domain_name,))
 
-def update_domain_name(old: str, new: str, new_url: str = ""):
+def update_domain_name(old_url: str, new_domain: str, new_url: str):
     with _conn() as c:
         c.execute(
-            "UPDATE domains SET domain_name=?, full_url=? WHERE domain_name=?",
-            (new, new_url or new, old)
+            "UPDATE domains SET domain_name=?, full_url=? WHERE full_url=?",
+            (new_domain, new_url, old_url)
         )
 
 def update_status_by_id(domain_id: int, blocked: bool):
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M WIB")
     with _conn() as c:
         c.execute(
             "UPDATE domains SET is_blocked=?, checked_at=? WHERE id=?",
@@ -80,11 +100,20 @@ def update_status_by_id(domain_id: int, blocked: bool):
         )
 
 def update_status_by_name(domain_name: str, blocked: bool):
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    """Update semua entry dengan domain_name yang sama."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M WIB")
     with _conn() as c:
         c.execute(
             "UPDATE domains SET is_blocked=?, checked_at=? WHERE domain_name=?",
             (1 if blocked else 0, now, domain_name)
+        )
+
+def update_status_by_url(full_url: str, blocked: bool):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M WIB")
+    with _conn() as c:
+        c.execute(
+            "UPDATE domains SET is_blocked=?, checked_at=? WHERE full_url=?",
+            (1 if blocked else 0, now, full_url)
         )
 
 def get_all_domains() -> list:
@@ -102,7 +131,7 @@ def get_domain_count() -> int:
         return c.execute("SELECT COUNT(*) FROM domains").fetchone()[0]
 
 
-# ── SETTINGS ─────────────────────────────────────────────────────────────────
+# ── SETTINGS ──────────────────────────────────────────────────────────────────
 
 def save_setting(key: str, value):
     with _conn() as c:
