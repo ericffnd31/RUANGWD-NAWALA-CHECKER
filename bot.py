@@ -100,10 +100,7 @@ def build_list_msg(domains: list, page: int) -> str:
 
 
 def build_report_msg(results: list, page: int, title: str = "HASIL CEK DOMAIN") -> str:
-    """
-    results: [(domain_name, full_url, blocked, reason, checked_at)]
-    Dipakai untuk /checkall DAN laporan auto check.
-    """
+    """results: [(domain_name, full_url, blocked, reason, checked_at)]"""
     sn      = site_name()
     total_p = max(1, (len(results) + PER_PAGE - 1) // PER_PAGE)
     page    = max(1, min(page, total_p))
@@ -114,7 +111,7 @@ def build_report_msg(results: list, page: int, title: str = "HASIL CEK DOMAIN") 
     block = sum(1 for _,_,b,_,_ in results if b)
     now   = now_wib()
 
-    m  = f"🎯 *{title}*\n"
+    m  = f"🎯 *{esc(title)}*\n"
     m += f"`{'━'*30}`\n"
     m += f"Site : `{esc(sn)}`\n"
     m += f"Hal  : `{page}/{total_p}`\n\n"
@@ -135,7 +132,6 @@ def build_report_msg(results: list, page: int, title: str = "HASIL CEK DOMAIN") 
 
 
 def build_alert_msg(changed: list) -> str:
-    """Notifikasi perubahan status."""
     m  = "⚠️ *PERUBAHAN STATUS DOMAIN*\n"
     m += f"`{'━'*30}`\n"
     m += f"Site : `{esc(site_name())}`\n"
@@ -149,16 +145,18 @@ def build_alert_msg(changed: list) -> str:
     return m
 
 
-# ── AUTO CHECK ────────────────────────────────────────────────────────────────
+# ── CORE: jalankan pengecekan & kirim laporan ─────────────────────────────────
 
-async def run_auto_check(application: Application):
+async def do_check_and_report(bot, chat_id: int, title: str, store_key: str, app: Application):
+    """
+    Fungsi inti: cek semua domain, update DB, kirim laporan + notif perubahan.
+    Dipanggil oleh auto check maupun /testcheck.
+    """
     domains = db.get_all_domains()
-    if not domains: return
-    s       = db.get_settings()
-    chat_id = s.get("chat_id")
-    if not chat_id or not s.get("alerts_active", True): return
+    if not domains:
+        logger.info("Tidak ada domain untuk dicek.")
+        return
 
-    # Cache DNS per domain_name agar domain yg sama tidak dicek berkali-kali
     cache: dict[str, tuple[bool, str]] = {}
     results = []
     changed = []
@@ -169,40 +167,62 @@ async def run_auto_check(application: Application):
         blocked, reason = cache[dname]
         db.update_status_by_id(did, blocked)
 
-        # Cek perubahan
         p = bool(prev) if prev is not None else None
         if p is not None and p != blocked:
             changed.append((dname, furl, p, blocked, reason))
 
         results.append((dname, furl, blocked, reason, now_wib()))
 
-    # 1. Kirim notifikasi perubahan (jika ada)
+    # Simpan hasil untuk navigasi callback
+    app.bot_data[store_key] = results
+
+    # Kirim notifikasi perubahan (jika ada)
     if changed:
         try:
-            await application.bot.send_message(
+            await bot.send_message(
                 chat_id=chat_id,
                 text=build_alert_msg(changed),
                 parse_mode="MarkdownV2"
             )
+            logger.info(f"Notifikasi perubahan: {len(changed)} domain.")
         except Exception as e:
-            logger.error(f"Alert error: {e}")
+            logger.error(f"Gagal kirim alert: {e}")
 
-    # 2. Kirim laporan lengkap setiap interval
+    # Kirim laporan lengkap (1 pesan + navigasi)
     total_p = max(1, (len(results) + PER_PAGE - 1) // PER_PAGE)
     try:
-        # Kirim halaman 1 dengan tombol navigasi
-        await application.bot.send_message(
+        await bot.send_message(
             chat_id=chat_id,
-            text=build_report_msg(results, 1, "LAPORAN AUTO CHECK"),
+            text=build_report_msg(results, 1, title),
             parse_mode="MarkdownV2",
-            reply_markup=nav_kb(1, total_p, "autocheck")
+            reply_markup=nav_kb(1, total_p, store_key.replace("_results", ""))
         )
-        # Simpan hasil di bot_data agar callback bisa akses
-        application.bot_data["autocheck_results"] = results
+        logger.info(f"Laporan terkirim: {len(results)} link, {len(changed)} berubah.")
     except Exception as e:
-        logger.error(f"Laporan auto check error: {e}")
+        logger.error(f"Gagal kirim laporan: {e}")
 
-    logger.info(f"Auto check selesai — {len(results)} link, {len(changed)} berubah.")
+
+# ── AUTO CHECK ────────────────────────────────────────────────────────────────
+
+async def run_auto_check(application: Application):
+    s       = db.get_settings()
+    chat_id = s.get("chat_id")
+
+    if not chat_id:
+        logger.warning("Auto check: chat_id belum disimpan. Kirim /start ke grup dulu.")
+        return
+    if not s.get("alerts_active", True):
+        logger.info("Auto check: alerts_active = False, skip.")
+        return
+
+    logger.info(f"Auto check mulai → chat_id: {chat_id}")
+    await do_check_and_report(
+        bot=application.bot,
+        chat_id=int(chat_id),
+        title="LAPORAN AUTO CHECK",
+        store_key="autocheck_results",
+        app=application
+    )
 
 
 def schedule_check(application: Application, minutes: int):
@@ -213,21 +233,27 @@ def schedule_check(application: Application, minutes: int):
     auto_check_job = scheduler.add_job(
         run_auto_check,
         trigger=IntervalTrigger(minutes=minutes),
-        args=[application], id="auto_check", replace_existing=True,
+        args=[application],
+        id="auto_check",
+        replace_existing=True,
     )
     db.save_setting("alerts_active", True)
-    logger.info(f"Auto check setiap {minutes} menit.")
+    nxt = auto_check_job.next_run_time
+    logger.info(f"Auto check dijadwalkan setiap {minutes} menit. Berikutnya: {nxt}")
 
 
 # ── /start ────────────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db.save_chat_id(update.effective_chat.id)
+    chat_id = update.effective_chat.id
+    db.save_chat_id(chat_id)
+    logger.info(f"/start — chat_id disimpan: {chat_id}")
     await update.message.reply_text(
         "👋 *Selamat datang di Nawala Checker Bot\\!*\n\n"
         "Bot mengecek domain terhadap:\n"
         "🔸 *Nawala* \\(DNS 180\\.131\\.144\\.144\\)\n"
         "🔸 *Trustpositif / Internet Positif*\n\n"
+        f"✅ Chat ID grup ini sudah tersimpan: `{chat_id}`\n\n"
         "Ketik /help untuk panduan\\.",
         parse_mode="MarkdownV2"
     )
@@ -249,19 +275,20 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "`/domain setsite <nama>` — set nama site\n\n"
             "*Cek Manual:*\n"
             "`/check <link/IP>` — cek satu\n"
-            "`/checkall` — cek semua sekarang\n\n"
+            "`/checkall` — cek semua sekarang\n"
+            "`/testcheck` — test kirim laporan ke grup\n\n"
             "*Import File:*\n"
             "Kirim file `.txt` + caption `/domain import`\n\n"
-            "`/status` — status bot\n",
+            "`/status` — status bot & debug info\n",
             parse_mode="Markdown"
         )
         return
     await update.message.reply_text(
         "📖 *Panduan Bot*\n\n"
         "`/domain add mez.ink/ruangwd`\n"
-        "`/domain add 146.190.92.3`\n"
         "`/domain list`\n"
-        "`/checkall`\n\n"
+        "`/checkall`\n"
+        "`/testcheck` — test laporan otomatis\n\n"
         "Ketik `/help -hh` untuk semua perintah.",
         parse_mode="Markdown"
     )
@@ -276,7 +303,6 @@ async def cmd_domain(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     sub = args[0].lower()
 
-    # ── add ──
     if sub == "add":
         if len(args) < 2:
             await update.message.reply_text(
@@ -286,7 +312,6 @@ async def cmd_domain(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         raw_list = args[1:]
 
-        # Single
         if len(raw_list) == 1:
             furl  = normalize_url(raw_list[0])
             dname = extract_domain(furl)
@@ -308,8 +333,6 @@ async def cmd_domain(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"└ Checked : `{esc(now_wib())}`",
                 parse_mode="MarkdownV2"
             )
-
-        # Multiple — simpan dulu, cek belakangan via /checkall
         else:
             tmp = await update.message.reply_text(
                 f"⏳ Menyimpan *{len(raw_list)} link*\\.\\.\\.", parse_mode="MarkdownV2"
@@ -342,7 +365,6 @@ async def cmd_domain(update: Update, context: ContextTypes.DEFAULT_TYPE):
             m += "\n💡 Gunakan `/checkall` untuk cek status semua\\."
             await tmp.edit_text(m, parse_mode="MarkdownV2")
 
-    # ── delete ──
     elif sub == "delete":
         if len(args) < 2:
             await update.message.reply_text("❌ `/domain delete <link>`", parse_mode="Markdown"); return
@@ -352,7 +374,6 @@ async def cmd_domain(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.delete_domain_by_url(furl)
         await update.message.reply_text(f"🗑️ `{furl}` dihapus.", parse_mode="Markdown")
 
-    # ── list ──
     elif sub == "list":
         domains = db.get_all_domains()
         if not domains:
@@ -363,7 +384,6 @@ async def cmd_domain(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=nav_kb(1, total_p, "list")
         )
 
-    # ── interval ──
     elif sub == "interval":
         if len(args) < 2:
             await update.message.reply_text("❌ `/domain interval <menit>`", parse_mode="Markdown"); return
@@ -373,13 +393,16 @@ async def cmd_domain(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Masukkan angka menit yang valid.", parse_mode="Markdown"); return
         db.save_setting("interval_minutes", minutes)
         schedule_check(context.application, minutes)
+        job = scheduler.get_job("auto_check")
+        nxt = "—"
+        if job and job.next_run_time:
+            nxt = job.next_run_time.astimezone(WIB).strftime("%Y-%m-%d %H:%M WIB")
         await update.message.reply_text(
             f"⏱️ Interval diubah ke *{minutes} menit*\\.\n"
-            f"Laporan otomatis akan dikirim setiap *{minutes} menit*\\.",
+            f"⏰ Laporan berikutnya: `{esc(nxt)}`",
             parse_mode="MarkdownV2"
         )
 
-    # ── stop ──
     elif sub == "stop":
         db.save_setting("alerts_active", False)
         if auto_check_job:
@@ -391,7 +414,6 @@ async def cmd_domain(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="MarkdownV2"
         )
 
-    # ── setsite ──
     elif sub == "setsite":
         if len(args) < 2:
             await update.message.reply_text("❌ `/domain setsite <nama>`", parse_mode="Markdown"); return
@@ -399,7 +421,6 @@ async def cmd_domain(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.save_setting("site_name", sn)
         await update.message.reply_text(f"✅ Nama site: `{sn}`", parse_mode="Markdown")
 
-    # ── import ──
     elif sub == "import":
         await update.message.reply_text(
             "📥 *Cara Import:*\n\n"
@@ -465,6 +486,47 @@ async def cmd_checkall(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ── /testcheck — trigger auto check manual ────────────────────────────────────
+
+async def cmd_testcheck(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Trigger auto check sekarang untuk test — kirim laporan ke grup."""
+    s       = db.get_settings()
+    chat_id = s.get("chat_id")
+
+    await update.message.reply_text(
+        f"🔧 *DEBUG INFO*\n"
+        f"`{'━'*30}`\n"
+        f"Chat ID tersimpan : `{chat_id or 'BELUM ADA'}`\n"
+        f"Chat ID grup ini  : `{update.effective_chat.id}`\n"
+        f"Alerts active     : `{s.get('alerts_active', True)}`\n"
+        f"Total domain DB   : `{db.get_domain_count()}`\n\n"
+        f"⏳ Mengirim laporan ke grup\\.\\.\\.",
+        parse_mode="MarkdownV2"
+    )
+
+    # Paksa gunakan chat_id grup saat ini
+    target_chat = update.effective_chat.id
+    # Update chat_id ke grup ini
+    db.save_chat_id(target_chat)
+
+    if db.get_domain_count() == 0:
+        await update.message.reply_text(
+            "❌ Tidak ada domain di database\\.\n"
+            "Import dulu dengan kirim file `.txt` \\+ caption `/domain import`",
+            parse_mode="MarkdownV2"
+        )
+        return
+
+    await do_check_and_report(
+        bot=context.bot,
+        chat_id=target_chat,
+        title="TEST LAPORAN AUTO CHECK",
+        store_key="autocheck_results",
+        app=context.application
+    )
+    await update.message.reply_text("✅ Laporan berhasil dikirim\\!", parse_mode="MarkdownV2")
+
+
 # ── /status ───────────────────────────────────────────────────────────────────
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -473,18 +535,24 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nxt = "—"
     if job and job.next_run_time:
         nxt = job.next_run_time.astimezone(WIB).strftime("%Y-%m-%d %H:%M WIB")
-    al  = "✅ Aktif" if s.get("alerts_active", True) else "🔕 Nonaktif"
+    al       = "✅ Aktif" if s.get("alerts_active", True) else "🔕 Nonaktif"
+    chat_id  = s.get("chat_id") or "❌ BELUM ADA — kirim /start ke grup"
+    job_st   = "✅ Berjalan" if (job and job.next_run_time) else "❌ Tidak aktif"
+
     await update.message.reply_text(
         f"🤖 *STATUS BOT*\n"
         f"`{'━'*30}`\n"
-        f"📋 Total link    : `{db.get_domain_count()}`\n"
-        f"🌐 Site          : `{esc(s.get('site_name','—'))}`\n"
-        f"⏱️  Interval       : `{s.get('interval_minutes', DEFAULT_INTERVAL_MINUTES)} menit`\n"
-        f"🔔 Laporan otomatis : {al}\n"
-        f"⏰ Laporan berikutnya : `{esc(nxt)}`\n\n"
+        f"📋 Total link         : `{db.get_domain_count()}`\n"
+        f"🌐 Site               : `{esc(s.get('site_name','—'))}`\n"
+        f"⏱️  Interval            : `{s.get('interval_minutes', DEFAULT_INTERVAL_MINUTES)} menit`\n"
+        f"🔔 Laporan otomatis   : {al}\n"
+        f"⚙️  Scheduler          : {job_st}\n"
+        f"⏰ Laporan berikutnya  : `{esc(nxt)}`\n"
+        f"💬 Chat ID tersimpan  : `{esc(str(chat_id))}`\n\n"
         f"🛡️ Cakupan:\n"
         f"  • Nawala \\(DNS 180\\.131\\.144\\.144\\)\n"
-        f"  • Trustpositif / Internet Positif",
+        f"  • Trustpositif / Internet Positif\n\n"
+        f"💡 Ketik `/testcheck` untuk test kirim laporan sekarang",
         parse_mode="MarkdownV2"
     )
 
@@ -528,7 +596,7 @@ async def cmd_domain_import(update: Update, context: ContextTypes.DEFAULT_TYPE):
             m += f"{icon} `{esc(furl)}`\n"
         if len(added) > 20:
             m += f"_\\.\\.\\. dan {len(added)-20} lainnya_\n"
-    m += "\n💡 Gunakan `/checkall` untuk cek semua\\."
+    m += "\n💡 Gunakan `/checkall` atau `/testcheck` untuk verifikasi\\."
     await tmp.edit_text(m, parse_mode="MarkdownV2")
 
 
@@ -552,12 +620,10 @@ async def cb_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
             build_list_msg(domains, page), parse_mode="MarkdownV2",
             reply_markup=nav_kb(page, total_p, "list")
         )
-
     elif cmd in ("checkall", "autocheck"):
-        key     = "checkall_results" if cmd == "checkall" else "autocheck_results"
+        key     = f"{cmd}_results"
         results = context.bot_data.get(key)
         if not results:
-            # fallback dari DB
             domains = db.get_all_domains()
             results = [(d[1], d[2], bool(d[3]) if d[3] is not None else False,
                         "", d[4] or "—") for d in domains]
@@ -578,30 +644,35 @@ async def err_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(application: Application):
     await application.bot.set_my_commands([
-        BotCommand("start",    "Mulai & daftarkan chat"),
-        BotCommand("help",     "Panduan penggunaan"),
-        BotCommand("domain",   "Kelola domain & IP"),
-        BotCommand("check",    "Cek satu link/IP"),
-        BotCommand("checkall", "Cek semua domain & IP"),
-        BotCommand("status",   "Status bot"),
+        BotCommand("start",     "Mulai & daftarkan chat grup"),
+        BotCommand("help",      "Panduan penggunaan"),
+        BotCommand("domain",    "Kelola domain & IP"),
+        BotCommand("check",     "Cek satu link/IP"),
+        BotCommand("checkall",  "Cek semua domain & IP"),
+        BotCommand("testcheck", "Test kirim laporan ke grup"),
+        BotCommand("status",    "Status bot & debug info"),
     ])
     s = db.get_settings()
     if not scheduler.running:
         scheduler.start()
-    if s.get("alerts_active", True):
+    if s.get("alerts_active", True) and s.get("chat_id"):
         schedule_check(application, s.get("interval_minutes", DEFAULT_INTERVAL_MINUTES))
+        logger.info(f"Auto check aktif setiap {s.get('interval_minutes', DEFAULT_INTERVAL_MINUTES)} menit.")
+    else:
+        logger.warning("Auto check TIDAK aktif — chat_id belum ada atau alerts dimatikan.")
     logger.info("Bot siap.")
 
 
 def main():
     db.init_db()
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
-    app.add_handler(CommandHandler("start",    cmd_start))
-    app.add_handler(CommandHandler("help",     cmd_help))
-    app.add_handler(CommandHandler("domain",   cmd_domain))
-    app.add_handler(CommandHandler("check",    cmd_check))
-    app.add_handler(CommandHandler("checkall", cmd_checkall))
-    app.add_handler(CommandHandler("status",   cmd_status))
+    app.add_handler(CommandHandler("start",     cmd_start))
+    app.add_handler(CommandHandler("help",      cmd_help))
+    app.add_handler(CommandHandler("domain",    cmd_domain))
+    app.add_handler(CommandHandler("check",     cmd_check))
+    app.add_handler(CommandHandler("checkall",  cmd_checkall))
+    app.add_handler(CommandHandler("testcheck", cmd_testcheck))
+    app.add_handler(CommandHandler("status",    cmd_status))
     app.add_handler(CallbackQueryHandler(cb_nav))
     app.add_handler(MessageHandler(
         filters.Document.TXT & filters.CaptionRegex(r"^/domain import"),
