@@ -1,21 +1,35 @@
 """
-Nawala Checker — DNS (domain) + HTTP (IP address)
+Nawala + Trustpositif Checker
+- Domain : DNS via Nawala (180.131.144.144) + DNS via Trustpositif (8.8.8.8 redirect check)
+- IP     : HTTP request, deteksi halaman blokir
 """
 
 import re
-import socket
 import logging
 import urllib.request
-import urllib.error
 
 logger = logging.getLogger(__name__)
 
-NAWALA_BLOCK_IPS   = {"180.131.144.144", "180.131.145.254"}
-NAWALA_DNS_SERVERS = ["180.131.144.144", "180.131.145.254"]
+# ── Nawala ────────────────────────────────────────────────────────────────────
+NAWALA_DNS      = ["180.131.144.144", "180.131.145.254"]
+NAWALA_BLOCK_IP = {"180.131.144.144", "180.131.145.254"}
 
-NAWALA_KEYWORDS = [
+# ── Trustpositif / Internet Positif ──────────────────────────────────────────
+# Saat domain diblokir Trustpositif, DNS Telkom/ISP mengarah ke:
+TRUST_BLOCK_IP  = {
+    "36.86.63.185",   # trustpositif.kominfo.go.id (lama)
+    "203.0.113.0",    # placeholder Kominfo
+    "114.137.65.130", # Telkom redirect
+    "103.7.30.57",    # XL redirect
+    "180.131.144.144","180.131.145.254",  # Nawala juga
+}
+TRUST_DNS       = ["114.114.114.114", "8.8.8.8"]  # DNS publik untuk crosscheck
+
+# ── Kata kunci halaman blokir (untuk IP/HTTP) ─────────────────────────────────
+BLOCK_KEYWORDS = [
     "nawala", "diblokir", "internet positif", "internetpositif",
-    "info.nawala", "blocked by",
+    "trustpositif", "kominfo", "info.nawala", "blocked by",
+    "situs ini diblokir", "positif.go.id",
 ]
 
 IP_RE = re.compile(r"^(\d{1,3}\.){3}\d{1,3}$")
@@ -32,26 +46,44 @@ def extract_domain(url: str) -> str:
     return url.lower()
 
 
-def _check_domain_dns(domain: str) -> bool:
-    """Cek domain via DNS Nawala — SYNC (dijalankan di executor)."""
+# ── DNS resolver sync ─────────────────────────────────────────────────────────
+
+def _dns_resolve(domain: str, nameservers: list) -> set:
+    """Resolve domain ke set IP menggunakan nameserver tertentu."""
     try:
         import dns.resolver, dns.exception
-        resolver = dns.resolver.Resolver()
-        resolver.nameservers = NAWALA_DNS_SERVERS
-        resolver.timeout  = 5
-        resolver.lifetime = 8
-        answers = resolver.resolve(domain, "A")
-        for rdata in answers:
-            if str(rdata) in NAWALA_BLOCK_IPS:
-                return True
-        return False
+        r = dns.resolver.Resolver()
+        r.nameservers = nameservers
+        r.timeout = 5
+        r.lifetime = 8
+        answers = r.resolve(domain, "A")
+        return {str(a) for a in answers}
     except Exception as e:
-        logger.warning(f"DNS check {domain}: {e}")
-        return False
+        logger.debug(f"DNS {nameservers[0]} → {domain}: {e}")
+        return set()
 
 
-def _check_ip_http(ip: str) -> bool:
-    """Cek IP via HTTP — SYNC (dijalankan di executor)."""
+def _check_domain_sync(domain: str) -> tuple[bool, str]:
+    """
+    Cek domain via DNS Nawala dan DNS publik.
+    Returns (blocked: bool, reason: str)
+    """
+    # Cek via DNS Nawala
+    nawala_ips = _dns_resolve(domain, NAWALA_DNS)
+    if nawala_ips & NAWALA_BLOCK_IP:
+        return True, "Nawala"
+
+    # Cek via DNS publik — apakah IP sama dengan IP blokir
+    public_ips = _dns_resolve(domain, TRUST_DNS)
+    if public_ips & TRUST_BLOCK_IP:
+        return True, "Trustpositif"
+
+    return False, ""
+
+
+# ── HTTP checker untuk IP ─────────────────────────────────────────────────────
+
+def _check_ip_sync(ip: str) -> tuple[bool, str]:
     for scheme in ("http", "https"):
         try:
             req = urllib.request.Request(
@@ -59,28 +91,32 @@ def _check_ip_http(ip: str) -> bool:
                 headers={"User-Agent": "Mozilla/5.0"},
             )
             with urllib.request.urlopen(req, timeout=8) as resp:
-                body = resp.read(8192).decode("utf-8", errors="ignore").lower()
+                body      = resp.read(8192).decode("utf-8", errors="ignore").lower()
                 final_url = resp.geturl().lower()
-                for kw in NAWALA_KEYWORDS:
+                for kw in BLOCK_KEYWORDS:
                     if kw in body or kw in final_url:
-                        logger.info(f"IP {ip} DIBLOKIR (kw: {kw})")
-                        return True
-                return False
+                        reason = "Trustpositif" if "trustpositif" in (body + final_url) else "Nawala/ISP"
+                        return True, reason
+                return False, ""
         except Exception as e:
-            logger.debug(f"HTTP {scheme}://{ip} → {e}")
+            logger.debug(f"HTTP {scheme}://{ip}: {e}")
             continue
-    return False
+    return False, ""
 
+
+# ── Public API ────────────────────────────────────────────────────────────────
 
 class NawalaChecker:
     async def check(self, target: str) -> bool:
-        """
-        Cek apakah domain/IP diblokir Nawala.
-        True = DIBLOKIR, False = AMAN
-        """
+        """True = DIBLOKIR."""
+        blocked, _ = await self.check_detail(target)
+        return blocked
+
+    async def check_detail(self, target: str) -> tuple[bool, str]:
+        """Returns (blocked, reason) — reason: 'Nawala', 'Trustpositif', ''."""
         import asyncio
         loop = asyncio.get_running_loop()
         if is_ip_address(target):
-            return await loop.run_in_executor(None, _check_ip_http, target)
+            return await loop.run_in_executor(None, _check_ip_sync, target)
         else:
-            return await loop.run_in_executor(None, _check_domain_dns, target)
+            return await loop.run_in_executor(None, _check_domain_sync, target)
