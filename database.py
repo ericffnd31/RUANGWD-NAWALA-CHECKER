@@ -164,3 +164,13 @@ def get_settings() -> dict:
 def save_chat_id(chat_id: int):
     save_setting("chat_id", chat_id)
     save_setting("alerts_active", True)
+
+
+def delete_all_domains():
+    """Hapus semua domain dari database sekaligus."""
+    with _conn() as c:
+        c.execute("DELETE FROM domains")
+        try:
+            c.execute("DELETE FROM sqlite_sequence WHERE name='domains'")
+        except Exception:
+            pass
