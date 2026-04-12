@@ -600,47 +600,49 @@ async def cmd_domain_import(update: Update, context: ContextTypes.DEFAULT_TYPE):
         entries.append((dname, furl))
 
     # Smart import: handle entry lama yang simpan domain saja tanpa path
-    result  = db.smart_import(entries)
+    result  = db.bulk_import(entries)
     added   = result["added"]
     updated = result["updated"]
     skipped = result["skipped"]
 
+    total_db = db.get_domain_count()
+    total_input = len(entries)
+
     m  = "📥 <b>HASIL IMPORT</b>\n"
     m += f"<code>{'━'*30}</code>\n"
     m += f"🕐 <code>{h(now_wib())}</code>\n\n"
-    m += f"✅ Ditambahkan   : <code>{len(added)}</code>\n"
-    m += f"🔄 Diperbarui    : <code>{len(updated)}</code>\n"
-    m += f"⏭️  Sudah ada     : <code>{len(skipped)}</code>\n"
-    m += f"❌ Error         : <code>{len(errors)}</code>\n"
-    m += f"📋 Total DB      : <code>{db.get_domain_count()}</code>\n\n"
+    m += f"✅ Baru ditambahkan : <code>{len(added)}</code>\n"
+    m += f"🔄 Diperbarui URL   : <code>{len(updated)}</code>\n"
+    m += f"⏭️  Sudah ada        : <code>{len(skipped)}</code>\n"
+    m += f"❌ Error            : <code>{len(errors)}</code>\n"
+    m += f"📋 Total DB         : <code>{total_db}</code>\n\n"
 
-    all_success = added + updated
-    if all_success:
-        m += "<b>Berhasil disimpan/diperbarui:</b>\n"
-        for dname, furl in all_success[:25]:
+    # Tampilkan semua yang berhasil (added + updated)
+    all_ok = added + updated
+    if all_ok:
+        m += f"<b>Berhasil ({len(all_ok)} link):</b>\n"
+        for dname, furl in all_ok[:20]:
             icon = "🖥️" if is_ip_address(dname) else "🌐"
             m += f"{icon} {make_link(furl)}\n"
-        if len(all_success) > 25:
-            m += f"<i>... dan {len(all_success)-25} lainnya</i>\n"
+        if len(all_ok) > 20:
+            m += f"<i>... dan {len(all_ok)-20} lainnya</i>\n"
 
+    # Jika ada yang diskip → tawarkan solusi
     if skipped:
-        m += f"\n<b>Link sudah ada ({len(skipped)}):</b>\n"
+        m += f"\n<b>Sudah ada di DB ({len(skipped)}):</b>\n"
         for furl in skipped[:10]:
             m += f"• <code>{h(furl)}</code>\n"
         if len(skipped) > 10:
             m += f"<i>... dan {len(skipped)-10} lainnya</i>\n"
+        m += (
+            "\n💡 Link ini sudah benar di DB.\n"
+            "Jika ingin <b>reset total</b> dan import ulang:\n"
+            "<code>/domain deleteall</code> → kirim file lagi"
+        )
+    else:
+        m += f"\n✅ <b>Semua {total_input} link berhasil masuk ke DB!</b>"
 
-    # Saran jika ada link yang terlewat
-    total_input = len(entries)
-    total_saved = db.get_domain_count()
-    if len(skipped) > 0 and len(added) == 0:
-        m += "\n⚠️ <b>Semua link sudah ada di database.</b>\n"
-        m += "Jika ingin reset dan import ulang, gunakan:\n"
-        m += "<code>/domain deleteall</code> lalu kirim file ini lagi."
-    elif total_input == (len(added) + len(updated) + len(skipped)):
-        m += f"\n✅ Semua <b>{total_input} link</b> berhasil diproses!"
-
-    m += "\n\n💡 Gunakan <code>/checkall</code> untuk cek semua domain."
+    m += "\n\n▶️ Gunakan <code>/checkall</code> untuk cek semua domain."
     await tmp.edit_text(m, parse_mode="HTML")
 
 
