@@ -1,6 +1,7 @@
 """
 Database SQLite — Nawala Bot
-Unique key: full_url  →  35 link berbeda = 35 row berbeda
+Unique key: full_url → 35 link = 35 row berbeda
+Import pakai INSERT OR REPLACE agar selalu masuk semua
 """
 
 import os
@@ -25,6 +26,7 @@ def _conn():
 
 def init_db():
     with _conn() as c:
+        # Buat tabel baru jika belum ada
         c.executescript("""
             CREATE TABLE IF NOT EXISTS domains (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -39,19 +41,19 @@ def init_db():
                 value TEXT NOT NULL
             );
         """)
-        # Migrasi: tambah kolom full_url jika belum ada
+
+        # Tambah kolom full_url jika belum ada (migrasi dari versi lama)
         cols = [r[1] for r in c.execute("PRAGMA table_info(domains)").fetchall()]
         if "full_url" not in cols:
             c.execute("ALTER TABLE domains ADD COLUMN full_url TEXT NOT NULL DEFAULT ''")
-            c.execute("UPDATE domains SET full_url = domain_name WHERE full_url = ''")
 
-        # Pastikan full_url terisi untuk semua row lama
+        # Isi full_url untuk row lama yang masih kosong
         c.execute("UPDATE domains SET full_url = domain_name WHERE full_url = '' OR full_url IS NULL")
 
-        # Buat unique index pada full_url
+        # Buat unique index pada full_url jika belum ada
         indexes = [r[1] for r in c.execute("PRAGMA index_list(domains)").fetchall()]
         if "idx_full_url" not in indexes:
-            # Hapus duplikat sebelum buat index
+            # Hapus duplikat full_url sebelum buat index
             c.execute("""
                 DELETE FROM domains WHERE id NOT IN (
                     SELECT MIN(id) FROM domains GROUP BY full_url
@@ -80,15 +82,8 @@ def domain_exists(domain_name: str) -> bool:
             "SELECT 1 FROM domains WHERE domain_name=?", (domain_name,)
         ).fetchone() is not None
 
-def get_full_url_for_domain(domain_name: str) -> str | None:
-    """Ambil full_url yang tersimpan untuk suatu domain (jika ada)."""
-    with _conn() as c:
-        row = c.execute(
-            "SELECT full_url FROM domains WHERE domain_name=? LIMIT 1", (domain_name,)
-        ).fetchone()
-        return row["full_url"] if row else None
-
 def add_domain(domain_name: str, full_url: str = ""):
+    """Tambah 1 domain. Jika full_url sudah ada → skip (INSERT OR IGNORE)."""
     furl = full_url or domain_name
     with _conn() as c:
         c.execute(
@@ -96,17 +91,60 @@ def add_domain(domain_name: str, full_url: str = ""):
             (domain_name, furl)
         )
 
-def upsert_domain(domain_name: str, full_url: str):
+def bulk_import(entries: list) -> dict:
     """
-    Tambah domain. Jika full_url sudah ada → skip.
-    Jika domain_name ada tapi full_url berbeda (entry lama simpan domain saja) → tetap tambah sebagai row baru.
+    Import banyak domain sekaligus.
+    entries: [(domain_name, full_url), ...]
+
+    Logika:
+    - Jika full_url sudah ada DAN full_url = domain_name (entry lama tanpa path)
+      → UPDATE full_url ke versi lengkap (dengan path)
+    - Jika full_url sudah ada DAN sudah benar → skip (sudah ada)
+    - Jika belum ada → INSERT baru
+
+    Returns: {"added": [...], "updated": [...], "skipped": [...], "errors": [...]}
     """
-    furl = full_url or domain_name
+    result = {"added": [], "updated": [], "skipped": [], "errors": []}
+
     with _conn() as c:
-        c.execute(
-            "INSERT OR IGNORE INTO domains (domain_name, full_url) VALUES (?,?)",
-            (domain_name, furl)
-        )
+        for domain_name, full_url in entries:
+            try:
+                # 1. Cek apakah full_url sudah ada persis
+                row_exact = c.execute(
+                    "SELECT id FROM domains WHERE full_url=?", (full_url,)
+                ).fetchone()
+
+                if row_exact:
+                    # Sudah ada persis → skip
+                    result["skipped"].append(full_url)
+                    continue
+
+                # 2. Cek apakah ada entry lama: domain_name sama, full_url = domain_name (tanpa path)
+                row_old = c.execute(
+                    "SELECT id FROM domains WHERE domain_name=? AND full_url=?",
+                    (domain_name, domain_name)
+                ).fetchone()
+
+                if row_old and full_url != domain_name:
+                    # Entry lama simpan domain saja → UPDATE full_url ke versi lengkap
+                    c.execute(
+                        "UPDATE domains SET full_url=? WHERE id=?",
+                        (full_url, row_old["id"])
+                    )
+                    result["updated"].append((domain_name, full_url))
+                else:
+                    # Benar-benar baru → INSERT
+                    c.execute(
+                        "INSERT INTO domains (domain_name, full_url) VALUES (?,?)",
+                        (domain_name, full_url)
+                    )
+                    result["added"].append((domain_name, full_url))
+
+            except Exception as e:
+                logger.error(f"Import error {full_url}: {e}")
+                result["errors"].append(full_url)
+
+    return result
 
 def delete_domain_by_url(full_url: str):
     with _conn() as c:
@@ -117,13 +155,14 @@ def delete_domain(domain_name: str):
         c.execute("DELETE FROM domains WHERE domain_name=?", (domain_name,))
 
 def delete_all_domains():
-    """Hapus semua domain dari database sekaligus."""
+    """Hapus semua domain dan reset auto-increment ID."""
     with _conn() as c:
         c.execute("DELETE FROM domains")
         try:
             c.execute("DELETE FROM sqlite_sequence WHERE name='domains'")
         except Exception:
             pass
+    logger.info("Semua domain dihapus.")
 
 def update_domain_name(old_url: str, new_domain: str, new_url: str):
     with _conn() as c:
@@ -166,54 +205,6 @@ def get_all_domains() -> list:
 def get_domain_count() -> int:
     with _conn() as c:
         return c.execute("SELECT COUNT(*) FROM domains").fetchone()[0]
-
-def smart_import(entries: list) -> dict:
-    """
-    Import cerdas: untuk setiap (domain_name, full_url):
-    - Jika full_url sudah ada → skip
-    - Jika domain_name ada dengan full_url = domain_name (entry lama) → update full_url + tambah sisanya
-    - Jika baru sama sekali → tambah
-    Returns: {"added": [...], "skipped": [...], "updated": [...]}
-    """
-    result = {"added": [], "skipped": [], "updated": []}
-
-    with _conn() as c:
-        for domain_name, full_url in entries:
-            # Cek apakah full_url sudah ada persis
-            exists = c.execute(
-                "SELECT id, full_url FROM domains WHERE full_url=?", (full_url,)
-            ).fetchone()
-
-            if exists:
-                result["skipped"].append(full_url)
-                continue
-
-            # Cek apakah ada entry lama dengan domain_name sama & full_url = domain_name
-            old_entry = c.execute(
-                "SELECT id, full_url FROM domains WHERE domain_name=? AND full_url=?",
-                (domain_name, domain_name)
-            ).fetchone()
-
-            if old_entry and full_url != domain_name:
-                # Entry lama simpan domain saja (tanpa path) → update jadi full URL
-                c.execute(
-                    "UPDATE domains SET full_url=? WHERE id=?",
-                    (full_url, old_entry["id"])
-                )
-                result["updated"].append((domain_name, full_url))
-            else:
-                # Tambah baru
-                try:
-                    c.execute(
-                        "INSERT INTO domains (domain_name, full_url) VALUES (?,?)",
-                        (domain_name, full_url)
-                    )
-                    result["added"].append((domain_name, full_url))
-                except Exception as e:
-                    logger.warning(f"Skip {full_url}: {e}")
-                    result["skipped"].append(full_url)
-
-    return result
 
 
 # ── SETTINGS ──────────────────────────────────────────────────────────────────
